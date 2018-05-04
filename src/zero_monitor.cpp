@@ -4,6 +4,8 @@
 #include <string>
 #include <signal.h>
 #include <math.h>
+#include <ctime>
+#include <sstream>
 
 #include <ros/ros.h>
 #include <ros/package.h>
@@ -55,7 +57,7 @@ cv::Mat state_monitor;
 cv::Mat monitor_img;
 std::vector<geometry_msgs::Vector3> path_points;
 
-ros::Time pathtracking_timestamp;
+double pathtracking_timestamp;
 
 boost::mutex map_mutex_;
 
@@ -126,9 +128,9 @@ void callbackFlagObstacle(const std_msgs::Int32::ConstPtr & msg_flag_obstacle) {
 
 void callbackPath(const core_msgs::PathArrayConstPtr& msg_path_tracking)
 {
-  if(Z_DEBUG) std::cout<<"path callback!"<<std::endl;
   path_points = msg_path_tracking->pathpoints;
-  pathtracking_timestamp = msg_path_tracking->header.stamp;
+  pathtracking_timestamp = msg_path_tracking->header.stamp.toSec();
+  // if(Z_DEBUG) std::cout<<"path callback timestamp:"<<pathtracking_timestamp<<std::endl;
 }
 
 void callbackState(const core_msgs::VehicleStateConstPtr& msg_state) {
@@ -151,7 +153,19 @@ int main(int argc, char** argv)
 {
   std::string record_path = ros::package::getPath("zero_monitor");
   //TODO: add date&time to the file name
-  record_path += "/data/monitor.mp4";
+  record_path += "/data/monitor";
+
+  time_t rawtime;
+  struct tm * timeinfo;
+  char buffer[80];
+
+  time (&rawtime);
+  timeinfo = localtime(&rawtime);
+  strftime(buffer,sizeof(buffer),"%d-%m-%Y %I:%M:%S",timeinfo);
+  std::string date_str(buffer);
+  record_path += date_str;
+  record_path += ".mp4";
+
   ROS_INFO_STREAM(record_path);
 
   x_waypoint = 180;
@@ -164,7 +178,7 @@ int main(int argc, char** argv)
   map_width = params_config["Map.width"];
   map_height = params_config["Map.height"];
   map_res = params_config["Map.resolution"];
-  bool isVideoOpened =  outputMonitorVideo.open(record_path, CV_FOURCC('X', '2', '6', '4'), 25, cv::Size(map_width*6, map_height*2+100), true);
+  bool isVideoOpened =  outputMonitorVideo.open(record_path, CV_FOURCC('X', '2', '6', '4'), 10, cv::Size(map_width*6, map_height*2+100), true);
 
   if(isVideoOpened)
     ROS_INFO("monitor video starts recorded!");
@@ -214,14 +228,8 @@ int main(int argc, char** argv)
     cv::resize(state_monitor, state_monitor_resized, cv::Size(map_height*2,map_width*2),0,0);
     //if(Z_DEBUG) std::cout<<"state monitor resized!!"<<std::endl;
 
-    //TODO: add path to state_monitor_resized
-    // ros::Duration d(ros::Time::now() - pathtracking_timestamp);
-    // std::cout<<"path delay: "<<d.toSec()<<std::endl;
-    //
-    // if(d.toSec()>1.0) {
-    //
-    // }
-    if(vState.flag_obstacle > 0) {
+    double path_delay_sec = ros::Time::now().toSec() - pathtracking_timestamp;
+    if(path_delay_sec < 3.0 && vState.flag_obstacle > 0) {
       for(int i= path_points.size()-1; i>=1;i--){
         int start_x = (int)(2*path_points.at(i).x);
         int start_y = (int)(2*path_points.at(i).y);
@@ -243,6 +251,28 @@ int main(int argc, char** argv)
     occupancy_map_resized.copyTo(monitor_img(cv::Rect(lane_topview_resized.cols+state_monitor_resized.cols,0,occupancy_map_resized.cols,occupancy_map_resized.rows)));
     //if(Z_DEBUG) std::cout<<"occupancy map copied!!"<<std::endl;
     //TODO: add text info to the image
+    cv::putText(monitor_img, "vehicle state", cv::Point(20, map_height*2+10), cv::FONT_HERSHEY_PLAIN, 1.0, cv::Scalar(250,250,250));
+    std::string basic_state = "";
+    if(vState.is_auto) basic_state +="AUTO   ";
+    else basic_state +="MANUAL ";
+
+    if(vState.gear ==0) basic_state +="DRIVE   ";
+    else if(vState.gear == 1) basic_state +="NEUTRAL ";
+    else if(vState.gear == 2) basic_state +="REAR    ";
+
+    if(vState.estop) basic_state+="!!ESTOP!!";
+    if(!vState.estop) cv::putText(monitor_img, basic_state, cv::Point(20, map_height*2+30), cv::FONT_HERSHEY_PLAIN, 1.0, cv::Scalar(250,250,250));
+    else cv::putText(monitor_img, basic_state, cv::Point(20, map_height*2+30), cv::FONT_HERSHEY_PLAIN, 1.0, cv::Scalar(255,100,100));
+
+    std::stringstream stream;
+    double v_kmph = 3.6*vState.speed;
+    stream << "v(km/h): " << std::fixed << std::setprecision(2) << v_kmph << "  steer(deg): "<<vState.steer;
+
+    // std::string v_state = ;
+    std::string v_state = stream.str();
+
+    cv::putText(monitor_img, v_state, cv::Point(20, map_height*2+50), cv::FONT_HERSHEY_PLAIN, 1.2, cv::Scalar(250,250,250));
+
 
     //publishing monitor image
     msgMonitorImg = cv_bridge::CvImage(std_msgs::Header(),"rgb8", monitor_img).toImageMsg();
