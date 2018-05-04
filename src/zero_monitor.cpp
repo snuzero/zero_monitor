@@ -54,7 +54,8 @@ double lane_topview_timestamp;
 cv::Mat state_monitor;
 cv::Mat monitor_img;
 std::vector<geometry_msgs::Vector3> path_points;
-double pathtracking_timestamp;
+
+ros::Time pathtracking_timestamp;
 
 boost::mutex map_mutex_;
 
@@ -126,9 +127,8 @@ void callbackFlagObstacle(const std_msgs::Int32::ConstPtr & msg_flag_obstacle) {
 void callbackPath(const core_msgs::PathArrayConstPtr& msg_path_tracking)
 {
   if(Z_DEBUG) std::cout<<"path callback!"<<std::endl;
-
   path_points = msg_path_tracking->pathpoints;
-  pathtracking_timestamp = msg_path_tracking->header.stamp.toSec();
+  pathtracking_timestamp = msg_path_tracking->header.stamp;
 }
 
 void callbackState(const core_msgs::VehicleStateConstPtr& msg_state) {
@@ -215,6 +215,12 @@ int main(int argc, char** argv)
     //if(Z_DEBUG) std::cout<<"state monitor resized!!"<<std::endl;
 
     //TODO: add path to state_monitor_resized
+    // ros::Duration d(ros::Time::now() - pathtracking_timestamp);
+    // std::cout<<"path delay: "<<d.toSec()<<std::endl;
+    //
+    // if(d.toSec()>1.0) {
+    //
+    // }
     if(vState.flag_obstacle > 0) {
       for(int i= path_points.size()-1; i>=1;i--){
         int start_x = (int)(2*path_points.at(i).x);
