@@ -16,6 +16,7 @@
 
 #include "core_msgs/PathArray.h"
 #include "core_msgs/VehicleState.h"
+#include "core_msgs/Control.h"
 #include "core_msgs/CenPoint.h"
 #include "std_msgs/Int32.h"
 #include "geometry_msgs/Pose2D.h"
@@ -25,7 +26,7 @@
 #include "opencv2/opencv.hpp"
 #include <boost/thread.hpp>
 
-#define Z_DEBUG true
+bool MONITOR_DEBUG=false;
 
 struct vehicle_state {
   bool is_auto;
@@ -42,6 +43,7 @@ std::string config_path;
 cv::VideoWriter outputMonitorVideo;
 
 vehicle_state vState;
+vehicle_state vControl;
 
 image_transport::Publisher publishMonitorImg;
 sensor_msgs::ImagePtr msgMonitorImg;
@@ -56,11 +58,12 @@ double lane_topview_timestamp;
 cv::Mat state_monitor;
 cv::Mat monitor_img;
 std::vector<geometry_msgs::Vector3> path_points;
+std::vector<geometry_msgs::Vector3> path_points_update;
 
 double pathtracking_timestamp;
 
 boost::mutex map_mutex_;
-
+int e_stop = 0;
 
 void callbackLaneCam(const sensor_msgs::ImageConstPtr& msg_lane_cam)
 {
@@ -126,11 +129,19 @@ void callbackFlagObstacle(const std_msgs::Int32::ConstPtr & msg_flag_obstacle) {
   vState.flag_obstacle = msg_flag_obstacle->data;
 }
 
+void callbackEstop(const std_msgs::Int32::ConstPtr & msg_estop) {
+  e_stop = msg_estop->data;
+}
+
 void callbackPath(const core_msgs::PathArrayConstPtr& msg_path_tracking)
 {
   path_points = msg_path_tracking->pathpoints;
   pathtracking_timestamp = msg_path_tracking->header.stamp.toSec();
   // if(Z_DEBUG) std::cout<<"path callback timestamp:"<<pathtracking_timestamp<<std::endl;
+}
+void callbackPathUpdate(const core_msgs::PathArrayConstPtr& msg_path_tracking)
+{
+  path_points_update = msg_path_tracking->pathpoints;
 }
 
 void callbackState(const core_msgs::VehicleStateConstPtr& msg_state) {
@@ -138,10 +149,18 @@ void callbackState(const core_msgs::VehicleStateConstPtr& msg_state) {
   vState.estop = msg_state->estop;
   vState.gear = msg_state->gear;
   vState.brake = msg_state->brake;
-  vState.steer = msg_state->steer;
+  vState.steer = -msg_state->steer;
   vState.speed = msg_state->speed;
 }
 
+void callbackControl(const core_msgs::ControlConstPtr& msg_control) {
+  vControl.is_auto = msg_control->is_auto;
+  vControl.estop = msg_control->estop;
+  vControl.gear = msg_control->gear;
+  vControl.brake = msg_control->brake;
+  vControl.steer = -msg_control->steer;
+  vControl.speed = msg_control->speed;
+}
 void callbackTerminate(const std_msgs::Int32Ptr& record){
   outputMonitorVideo.release();
   ROS_INFO("Monitor Video recording safely terminated");
@@ -151,6 +170,14 @@ void callbackTerminate(const std_msgs::Int32Ptr& record){
 
 int main(int argc, char** argv)
 {
+  //argument setting initialization
+  if(argc < 2)  {
+      std::cout << "usage: rosrun zero_monitor z_monitor debug_mode" << std::endl;
+      std::cout << "debug_mode is true for debug" << std::endl;
+      return -1;
+  }
+
+  if (!strcmp(argv[1], "true")) MONITOR_DEBUG = true;
   std::string record_path = ros::package::getPath("zero_monitor");
   //TODO: add date&time to the file name
   record_path += "/data/monitor";
@@ -198,14 +225,19 @@ int main(int argc, char** argv)
   ros::Subscriber laneSub = nh.subscribe("/warped_image",1,callbackLaneCam);
   ros::Subscriber occupancySub = nh.subscribe("/occupancy_map",1,callbackOccupancyMap);
   ros::Subscriber occupancyRawSub = nh.subscribe("/occupancy_map_raw",1,callbackOccupancyRaw);
-  ros::Subscriber pathSub;
-  if(Z_DEBUG) pathSub = nh.subscribe("/sPath",1,callbackPath);
+  ros::Subscriber pathSub, pathupdateSub;
+  if(MONITOR_DEBUG){
+    pathSub = nh.subscribe("/sPath",1,callbackPath);
+    pathupdateSub = nh.subscribe("/path_tracking",1,callbackPathUpdate);
+  }
   else pathSub = nh.subscribe("/path_tracking",1,callbackPath);
   ros::Subscriber waypointSub = nh.subscribe("/waypoints",1,callbackWaypoint);
   ros::Subscriber flagobstacleSub = nh.subscribe("/flag_obstacle",1,callbackFlagObstacle);
   ros::Subscriber stateSub = nh.subscribe("/vehicle_state",1,callbackState);
-
+  ros::Subscriber controlSub = nh.subscribe("/control",1,callbackControl);
   ros::Subscriber endSub = nh.subscribe("/end_system",1,callbackTerminate);
+  ros::Subscriber estopSub = nh.subscribe("/emergency_stop",1,callbackEstop);
+
   ros::Rate loop_rate(10);
   while(ros::ok()){
     //if(Z_DEBUG) std::cout<<"while loop starts!!"<<std::endl;
@@ -229,7 +261,9 @@ int main(int argc, char** argv)
     //if(Z_DEBUG) std::cout<<"state monitor resized!!"<<std::endl;
 
     double path_delay_sec = ros::Time::now().toSec() - pathtracking_timestamp;
+    // if(vState.flag_obstacle > 0) {
     if(path_delay_sec < 3.0 && vState.flag_obstacle > 0) {
+      std::cout<<"drawing path"<<std::endl;
       for(int i= path_points.size()-1; i>=1;i--){
         int start_x = (int)(2*path_points.at(i).x);
         int start_y = (int)(2*path_points.at(i).y);
@@ -238,6 +272,17 @@ int main(int argc, char** argv)
         cv::line(state_monitor_resized,cv::Point(start_x, start_y), cv::Point(end_x, end_y), cv::Scalar(100,255,100),2);
       }
     }
+    if(MONITOR_DEBUG && vState.flag_obstacle>0) {
+      for(int i= path_points_update.size()-1; i>=1;i--){
+        int start_x = (int)(2*path_points_update.at(i).x);
+        int start_y = (int)(2*path_points_update.at(i).y);
+        int end_x = (int)(2*path_points_update.at(i-1).x);
+        int end_y = (int)(2*path_points_update.at(i-1).y);
+        cv::line(state_monitor_resized,cv::Point(start_x, start_y), cv::Point(end_x, end_y), cv::Scalar(100,255,255),2);
+      }
+    }
+
+
     else if(vState.flag_obstacle == 0) {
       cv::line(state_monitor_resized,cv::Point(map_width, map_height*2), cv::Point(map_width - 2*y_waypoint, map_height*2-2*x_waypoint), cv::Scalar(255,255,100),2);
     }
@@ -267,13 +312,38 @@ int main(int argc, char** argv)
     std::stringstream stream;
     double v_kmph = 3.6*vState.speed;
     stream << "v(km/h): " << std::fixed << std::setprecision(2) << v_kmph << "  steer(deg): "<<vState.steer;
-
-    // std::string v_state = ;
+    std::stringstream stream_brake;
+    stream_brake << "Brake: " << vState.brake;
     std::string v_state = stream.str();
-
+    std::string b_state = stream_brake.str();
     cv::putText(monitor_img, v_state, cv::Point(20, map_height*2+50), cv::FONT_HERSHEY_PLAIN, 1.2, cv::Scalar(250,250,250));
+    cv::putText(monitor_img, b_state, cv::Point(20, map_height*2+70), cv::FONT_HERSHEY_PLAIN, 1.2, cv::Scalar(250,250,250));
 
 
+    std::string basic_control = "";
+    if(vControl.is_auto) basic_control +="AUTO   ";
+    else basic_control +="MANUAL ";
+
+    if(vControl.gear ==0) basic_control +="DRIVE   ";
+    else if(vControl.gear == 1) basic_control +="NEUTRAL ";
+    else if(vControl.gear == 2) basic_control +="REAR    ";
+
+    if(vControl.estop) basic_control+="!!ESTOP!!";
+    if(!vControl.estop) cv::putText(monitor_img, basic_control, cv::Point(20+map_width*4, map_height*2+30), cv::FONT_HERSHEY_PLAIN, 1.0, cv::Scalar(255,255,150));
+    else cv::putText(monitor_img, basic_control, cv::Point(20+map_width*4, map_height*2+30), cv::FONT_HERSHEY_PLAIN, 1.0, cv::Scalar(255,100,100));
+
+    cv::putText(monitor_img, "control output", cv::Point(map_width*4+20, map_height*2+10), cv::FONT_HERSHEY_PLAIN, 1.0, cv::Scalar(250,250,250));
+    std::stringstream control;
+    control << "v(km/h): " << std::fixed << std::setprecision(2) << 3.6*vControl.speed << "  steer(deg): "<<vControl.steer;
+    std::stringstream control_brake;
+    control_brake << "Brake: " << vControl.brake;
+    std::string v_control = control.str();
+    std::string b_control = control_brake.str();
+    cv::putText(monitor_img, v_control, cv::Point(map_width*4+20, map_height*2+50), cv::FONT_HERSHEY_PLAIN, 1.2, cv::Scalar(255,255,150));
+    cv::putText(monitor_img, b_control, cv::Point(map_width*4+20, map_height*2+70), cv::FONT_HERSHEY_PLAIN, 1.2, cv::Scalar(255,255,150));
+
+    std::string e_stop_text = "Autonomous Emergency Braking Occured";
+    if(e_stop==1) cv::putText(monitor_img, e_stop_text, cv::Point(map_width*2+20, map_height*2+20), cv::FONT_HERSHEY_PLAIN, 1.2, cv::Scalar(255,150,150));
     //publishing monitor image
     msgMonitorImg = cv_bridge::CvImage(std_msgs::Header(),"rgb8", monitor_img).toImageMsg();
     publishMonitorImg.publish(msgMonitorImg);
